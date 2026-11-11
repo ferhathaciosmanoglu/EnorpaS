@@ -266,15 +266,40 @@ async function startCamera(){stopCamera();try{state.stream=await navigator.media
 function stopCamera(){if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null}}
 async function capture(){const v=$("#cam");if(!v||!v.videoWidth)return alert("Kamera hazır değil.");const c=document.createElement("canvas");c.width=v.videoWidth;c.height=v.videoHeight;c.getContext("2d").drawImage(v,0,0);await savePhoto(c,activeSteps()[state.stepIndex])}
 function resumeCameraIfNeeded(){setTimeout(()=>{if(!state.stream&&$("#cam")&&$("#flow")&&getComputedStyle($("#flow")).display!=="none")startCamera()},400)}
+async function decodeImageFile(file){
+  if(window.createImageBitmap){try{return await createImageBitmap(file,{imageOrientation:"from-image"})}catch(_){}}
+  const url=URL.createObjectURL(file),img=new Image();
+  try{await new Promise((ok,no)=>{img.onload=ok;img.onerror=no;img.src=url});const c=document.createElement("canvas");c.width=img.naturalWidth;c.height=img.naturalHeight;c.getContext("2d").drawImage(img,0,0);return c}
+  catch(_){return null}finally{URL.revokeObjectURL(url)}
+}
+async function isHeicFile(file){
+  if(/hei[cf]/i.test(file.type||"")||/\.hei[cf]$/i.test(file.name||""))return true;
+  try{const b=new Uint8Array(await file.slice(0,16).arrayBuffer());const tag=String.fromCharCode(...b.slice(4,12));return /^ftyp(heic|heix|hevc|hevx|heim|heis|mif1|msf1)/.test(tag)}catch(_){return false}
+}
+let heic2anyLoader=null;
+function loadHeic2any(){
+  if(window.heic2any)return Promise.resolve(window.heic2any);
+  if(!heic2anyLoader)heic2anyLoader=new Promise((ok,no)=>{const sc=document.createElement("script");sc.src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";sc.onload=()=>window.heic2any?ok(window.heic2any):no(new Error("HEIC dönüştürücü yüklenemedi"));sc.onerror=()=>{heic2anyLoader=null;no(new Error("HEIC dönüştürücü yüklenemedi. İnternet bağlantısını kontrol edin."))};document.head.appendChild(sc)});
+  return heic2anyLoader;
+}
+async function convertHeicToJpeg(file){
+  const h2a=await loadHeic2any();
+  let out=await h2a({blob:file,toType:"image/jpeg",quality:.85});
+  if(Array.isArray(out))out=out[0];
+  return out;
+}
 async function savePhoto(source,s){
   const status=$("#photoStatus");let url=null,img=source;
   try{
     if(status){status.textContent="Fotoğraf işleniyor…";status.classList.remove("done")}
     if(source instanceof File){
-      if(/hei[cf]/i.test(source.type)||/\.hei[cf]$/i.test(source.name||""))throw new Error("HEIC");
-      img=null;
-      if(window.createImageBitmap){try{img=await createImageBitmap(source,{imageOrientation:"from-image"})}catch(_){img=null}}
-      if(!img){url=URL.createObjectURL(source);img=new Image();await new Promise((ok,no)=>{img.onload=ok;img.onerror=()=>no(new Error("Resim açılamadı ("+(source.type||"bilinmeyen tür")+")"));img.src=url})}
+      img=await decodeImageFile(source);
+      if(!img&&await isHeicFile(source)){
+        if(status)status.textContent="HEIC fotoğraf dönüştürülüyor…";
+        const jpg=await convertHeicToJpeg(source);
+        img=await decodeImageFile(jpg);
+      }
+      if(!img)throw new Error("Resim açılamadı ("+(source.type||"bilinmeyen tür")+")");
     }
     const w=img.naturalWidth||img.videoWidth||img.width,h=img.naturalHeight||img.videoHeight||img.height;
     if(!w||!h)throw new Error("Resim boyutu okunamadı");
@@ -290,7 +315,7 @@ async function savePhoto(source,s){
   }catch(e){
     console.error("Fotoğraf eklenemedi",e);
     const st=$("#photoStatus");if(st&&!state.photos[s.id]){st.textContent="Henüz fotoğraf çekilmedi";st.classList.remove("done")}else if(st){st.textContent="✓ Fotoğraf hazır";st.classList.add("done")}
-    alert(e.message==="HEIC"?"Bu fotoğraf HEIC/HEIF formatında ve tarayıcı açamıyor. Kamera ayarlarından 'Yüksek verimli resim (HEIF)' seçeneğini kapatın veya 'Fotoğraf çek' ile doğrudan çekin.":"Fotoğraf eklenemedi: "+(e&&e.message||e))
+    alert("Fotoğraf eklenemedi: "+(e&&e.message||e))
   }finally{if(url)URL.revokeObjectURL(url)}
 }
 function nextStep(){stopCamera();state.stepIndex++;if(state.stepIndex>=activeSteps().length){applyDefaults();renderReview();show("review")}else renderFlow()}
