@@ -276,17 +276,26 @@ async function isHeicFile(file){
   if(/hei[cf]/i.test(file.type||"")||/\.hei[cf]$/i.test(file.name||""))return true;
   try{const b=new Uint8Array(await file.slice(0,16).arrayBuffer());const tag=String.fromCharCode(...b.slice(4,12));return /^ftyp(heic|heix|hevc|hevx|heim|heis|mif1|msf1)/.test(tag)}catch(_){return false}
 }
-let heic2anyLoader=null;
-function loadHeic2any(){
-  if(window.heic2any)return Promise.resolve(window.heic2any);
-  if(!heic2anyLoader)heic2anyLoader=new Promise((ok,no)=>{const sc=document.createElement("script");sc.src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";sc.onload=()=>window.heic2any?ok(window.heic2any):no(new Error("HEIC dönüştürücü yüklenemedi"));sc.onerror=()=>{heic2anyLoader=null;no(new Error("HEIC dönüştürücü yüklenemedi. İnternet bağlantısını kontrol edin."))};document.head.appendChild(sc)});
-  return heic2anyLoader;
+const heicLoaders={};
+function loadScriptOnce(key,src,check){
+  if(check())return Promise.resolve(check());
+  if(!heicLoaders[key])heicLoaders[key]=new Promise((ok,no)=>{const sc=document.createElement("script");sc.src=src;sc.async=true;sc.onload=()=>check()?ok(check()):no(new Error("Kütüphane yüklenemedi"));sc.onerror=()=>{delete heicLoaders[key];no(new Error("HEIC dönüştürücü yüklenemedi. İnternet bağlantısını kontrol edin."))};document.head.appendChild(sc)});
+  return heicLoaders[key];
 }
 async function convertHeicToJpeg(file){
-  const h2a=await loadHeic2any();
-  let out=await h2a({blob:file,toType:"image/jpeg",quality:.85});
-  if(Array.isArray(out))out=out[0];
-  return out;
+  const errors=[];
+  try{
+    const fn=await loadScriptOnce("heicto","https://cdn.jsdelivr.net/npm/heic-to@1/dist/iife/heic-to.js",()=>(window.HeicTo&&(window.HeicTo.heicTo||window.HeicTo))||window.heicTo);
+    const out=await fn({blob:file,type:"image/jpeg",quality:.85});
+    if(out&&out.size)return out;
+  }catch(e){errors.push(e&&e.message||String(e))}
+  try{
+    const h2a=await loadScriptOnce("heic2any","https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js",()=>window.heic2any);
+    let out=await h2a({blob:file,toType:"image/jpeg",quality:.85});
+    if(Array.isArray(out))out=out[0];
+    if(out&&out.size)return out;
+  }catch(e){errors.push(e&&(e.message||e.code)||String(e))}
+  throw new Error("HEIC fotoğraf dönüştürülemedi ("+errors.join(" / ")+")");
 }
 async function savePhoto(source,s){
   const status=$("#photoStatus");let url=null,img=source;
