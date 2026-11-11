@@ -249,10 +249,11 @@ async function renderPhotoForm(s){
   $("#stage").innerHTML=`<div class="camera-box"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="stage-card"><span class="step-label">FOTOĞRAF + MANUEL GİRİŞ</span><h2>${esc(s.category)}</h2><p>${esc(s.instruction)}</p><div class="tip">${esc(s.hint)}</div><div id="photoStatus" class="photo-status ${state.photos[s.id]?"done":""}">${state.photos[s.id]?"✓ Fotoğraf hazır":"Henüz fotoğraf çekilmedi"}</div><div class="actions"><button class="primary" id="shoot" type="button">Fotoğraf çek</button><button class="secondary" id="galleryButton" type="button">Galeriden seç</button><input id="cameraPick" class="native-file-input" type="file" accept="image/*" capture="environment" aria-label="Kameradan fotoğraf çek"><input id="pick" class="native-file-input" type="file" accept="image/*" aria-label="Galeriden fotoğraf seç"></div><div class="manual-fields">${s.fields.map(([k,l,p])=>`<div class="manual-field"><label>${esc(l)}</label><input data-key="${k}" value="${attr(state.values[k]||"")}" placeholder="${attr(p)}"></div>`).join("")}</div><div class="actions"><button class="primary" id="continue">Kaydet ve devam et</button><button class="secondary" id="saveProgress">Taslak kaydet</button></div></div>`;
   document.querySelectorAll("[data-key]").forEach(i=>i.oninput=()=>state.values[i.dataset.key]=i.value.trim());
   const galleryInput=$("#pick"),cameraInput=$("#cameraPick");
-  $("#galleryButton").onclick=()=>galleryInput.click();
-  $("#shoot").onclick=()=>{const v=$("#cam");if(v&&v.videoWidth)capture();else cameraInput.click()};
-  galleryInput.onchange=e=>{const file=e.target.files&&e.target.files[0];if(file)savePhoto(file,s);e.target.value=""};
-  cameraInput.onchange=e=>{const file=e.target.files&&e.target.files[0];if(file)savePhoto(file,s);e.target.value=""};
+  const openPicker=input=>{stopCamera();addEventListener("focus",resumeCameraIfNeeded,{once:true});input.click()};
+  $("#galleryButton").onclick=()=>openPicker(galleryInput);
+  $("#shoot").onclick=()=>{const v=$("#cam");if(v&&v.videoWidth&&state.stream)capture();else openPicker(cameraInput)};
+  const onPick=async e=>{const file=e.target.files&&e.target.files[0];e.target.value="";if(file)await savePhoto(file,s);resumeCameraIfNeeded()};
+  galleryInput.onchange=onPick;cameraInput.onchange=onPick;
   $("#continue").onclick=()=>{if(!state.photos[s.id])return alert("Fotoğraf çekin veya galeriden seçin.");const miss=s.fields.filter(([k])=>!String(state.values[k]||"").trim());if(miss.length)return alert("Tüm alanları doldurun.");nextStep()};
   $("#saveProgress").onclick=saveCurrentDraft;await startCamera()
 }
@@ -264,7 +265,34 @@ function renderChecklist(s){
 async function startCamera(){stopCamera();try{state.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}},audio:false});$("#cam").srcObject=state.stream}catch(e){}}
 function stopCamera(){if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null}}
 async function capture(){const v=$("#cam");if(!v||!v.videoWidth)return alert("Kamera hazır değil.");const c=document.createElement("canvas");c.width=v.videoWidth;c.height=v.videoHeight;c.getContext("2d").drawImage(v,0,0);await savePhoto(c,activeSteps()[state.stepIndex])}
-async function savePhoto(source,s){let img=source;if(source instanceof File){img=new Image();img.src=URL.createObjectURL(source);await img.decode()}const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height,scale=Math.min(1,1600/w),c=document.createElement("canvas");c.width=Math.round(w*scale);c.height=Math.round(h*scale);c.getContext("2d").drawImage(img,0,0,w,h,0,0,c.width,c.height);state.photos[s.id]={category:s.category,dataUrl:c.toDataURL("image/jpeg",.76)};$("#photoStatus").textContent="✓ Fotoğraf hazır";$("#photoStatus").classList.add("done")}
+function resumeCameraIfNeeded(){setTimeout(()=>{if(!state.stream&&$("#cam")&&$("#flow")&&getComputedStyle($("#flow")).display!=="none")startCamera()},400)}
+async function savePhoto(source,s){
+  const status=$("#photoStatus");let url=null,img=source;
+  try{
+    if(status){status.textContent="Fotoğraf işleniyor…";status.classList.remove("done")}
+    if(source instanceof File){
+      if(/hei[cf]/i.test(source.type)||/\.hei[cf]$/i.test(source.name||""))throw new Error("HEIC");
+      img=null;
+      if(window.createImageBitmap){try{img=await createImageBitmap(source,{imageOrientation:"from-image"})}catch(_){img=null}}
+      if(!img){url=URL.createObjectURL(source);img=new Image();await new Promise((ok,no)=>{img.onload=ok;img.onerror=()=>no(new Error("Resim açılamadı ("+(source.type||"bilinmeyen tür")+")"));img.src=url})}
+    }
+    const w=img.naturalWidth||img.videoWidth||img.width,h=img.naturalHeight||img.videoHeight||img.height;
+    if(!w||!h)throw new Error("Resim boyutu okunamadı");
+    const scale=Math.min(1,1600/Math.max(w,h)),c=document.createElement("canvas");
+    c.width=Math.max(1,Math.round(w*scale));c.height=Math.max(1,Math.round(h*scale));
+    c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+    if(img&&img.close)img.close();
+    const dataUrl=c.toDataURL("image/jpeg",.76);
+    if(!dataUrl||dataUrl.length<100)throw new Error("Resim dönüştürülemedi");
+    state.photos[s.id]={category:s.category,dataUrl};
+    const st=$("#photoStatus");if(st){st.textContent="✓ Fotoğraf hazır";st.classList.add("done")}
+    try{if(state.recordId){state.values._createdAt||=new Date().toISOString();await db.put(buildRecord("draft"))}}catch(_){}
+  }catch(e){
+    console.error("Fotoğraf eklenemedi",e);
+    const st=$("#photoStatus");if(st&&!state.photos[s.id]){st.textContent="Henüz fotoğraf çekilmedi";st.classList.remove("done")}else if(st){st.textContent="✓ Fotoğraf hazır";st.classList.add("done")}
+    alert(e.message==="HEIC"?"Bu fotoğraf HEIC/HEIF formatında ve tarayıcı açamıyor. Kamera ayarlarından 'Yüksek verimli resim (HEIF)' seçeneğini kapatın veya 'Fotoğraf çek' ile doğrudan çekin.":"Fotoğraf eklenemedi: "+(e&&e.message||e))
+  }finally{if(url)URL.revokeObjectURL(url)}
+}
 function nextStep(){stopCamera();state.stepIndex++;if(state.stepIndex>=activeSteps().length){applyDefaults();renderReview();show("review")}else renderFlow()}
 function applyDefaults(){state.values.inspectionDate||=new Date().toLocaleDateString("tr-TR");state.values.flameDetectorType||=state.values.flameDetector==="Mevcut"?"Fotosel":"";state.values.finalResult||="Geçti"}
 function visibleGroups(){const kind=fuelKind(state.template.fuel),gasOnly=new Set(["rwfSocket"]);return reviewGroups.filter(([g])=>!(kind==="oil"&&g==="Doğalgaz ekipmanları")&&!(kind==="gas"&&g==="Sıvı yakıt ekipmanları")).map(([g,fields])=>[g,fields.filter(([key])=>!(kind==="oil"&&gasOnly.has(key)))])}
